@@ -1,133 +1,188 @@
-package main
+// Copyright 2022 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package ecdh implements Elliptic Curve Diffie-Hellman over
+// NIST curves and Curve25519.
+package ecdh
 
 import (
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/md5"
-	crand "crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
-	"fmt"
-
-	"github.com/tcolgate/gostikkit/evpkdf"
+	"crypto"
+	"crypto/internal/boring"
+	"crypto/subtle"
+	"errors"
+	"io"
+	"sync"
 )
 
-func main() {
-	b, _ := m()
-	md := hex.EncodeToString(b)
-	fmt.Printf("md5: %s\n", md)
+type Curve interface {
+	// GenerateKey generates a random PrivateKey.
+	//
+	// Most applications should use [crypto/rand.Reader] as rand. Note that the
+	// returned key does not depend deterministically on the bytes read from rand,
+	// and may change between calls and/or between versions.
+	GenerateKey(rand io.Reader) (*PrivateKey, error)
 
-	fmt.Printf("md5 base64: %s\n", base64.StdEncoding.EncodeToString(b))
+	// NewPrivateKey checks that key is valid and returns a PrivateKey.
+	//
+	// For NIST curves, this follows SEC 1, Version 2.0, Section 2.3.6, which
+	// amounts to decoding the bytes as a fixed length big endian integer and
+	// checking that the result is lower than the order of the curve. The zero
+	// private key is also rejected, as the encoding of the corresponding public
+	// key would be irregular.
+	//
+	// For X25519, this only checks the scalar length.
+	NewPrivateKey(key []byte) (*PrivateKey, error)
 
-	ciphertext := encryptCBC("scnace", md)
+	// NewPublicKey checks that key is valid and returns a PublicKey.
+	//
+	// For NIST curves, this decodes an uncompressed point according to SEC 1,
+	// Version 2.0, Section 2.3.4. Compressed encodings and the point at
+	// infinity are rejected.
+	//
+	// For X25519, this only checks the u-coordinate length. Adversarially
+	// selected public keys can cause ECDH to return an error.
+	NewPublicKey(key []byte) (*PublicKey, error)
 
-	fmt.Printf("ciphertext: %s\n", base64.StdEncoding.EncodeToString(ciphertext))
+	// ecdh performs an ECDH exchange and returns the shared secret. It's exposed
+	// as the PrivateKey.ECDH method.
+	//
+	// The private method also allow us to expand the ECDH interface with more
+	// methods in the future without breaking backwards compatibility.
+	ecdh(local *PrivateKey, remote *PublicKey) ([]byte, error)
 
-	// fmt.Printf("iv: %s\n", base64.StdEncoding.EncodeToString(iv))
-
+	// privateKeyToPublicKey converts a PrivateKey to a PublicKey. It's exposed
+	// as the PrivateKey.PublicKey method.
+	//
+	// This method always succeeds: for X25519, the zero key can't be
+	// constructed due to clamping; for NIST curves, it is rejected by
+	// NewPrivateKey.
+	privateKeyToPublicKey(*PrivateKey) *PublicKey
 }
 
-func m() ([]byte, error) {
-	hasher := md5.New()
-	if _, err := hasher.Write([]byte("hi")); err != nil {
-		return nil, err
-	}
-
-	return hasher.Sum(nil), nil
+// PublicKey is an ECDH public key, usually a peer's ECDH share sent over the wire.
+//
+// These keys can be parsed with [crypto/x509.ParsePKIXPublicKey] and encoded
+// with [crypto/x509.MarshalPKIXPublicKey]. For NIST curves, they then need to
+// be converted with [crypto/ecdsa.PublicKey.ECDH] after parsing.
+type PublicKey struct {
+	curve     Curve
+	publicKey []byte
+	boring    *boring.PublicKeyECDH
 }
 
-var opensslmagic = []byte{0x53, 0x61, 0x6c, 0x74, 0x65, 0x64, 0x5f, 0x5f}
-
-func addSalt(ciphertext, salt []byte) []byte {
-	if len(salt) == 0 {
-		return ciphertext
-	}
-	return append(append(opensslmagic, salt...), ciphertext...)
+// Bytes returns a copy of the encoding of the public key.
+func (k *PublicKey) Bytes() []byte {
+	// Copy the public key to a fixed size buffer that can get allocated on the
+	// caller's stack after inlining.
+	var buf [133]byte
+	return append(buf[:0], k.publicKey...)
 }
 
-func encryptCBC(plaintext string, passphares string) []byte {
-
-	salt := genChars(8)
-
-	keylen := 32
-	key := make([]byte, keylen)
-	ivlen := aes.BlockSize
-	iv := make([]byte, ivlen)
-
-	keymat := evpkdf.New(md5.New, []byte(passphares), salt, keylen+ivlen, 1)
-	keymatbuf := bytes.NewReader(keymat)
-
-	n, err := keymatbuf.Read(key)
-	if n != keylen || err != nil {
-		panic("keymaterial was short reading key")
+// Equal returns whether x represents the same public key as k.
+//
+// Note that there can be equivalent public keys with different encodings which
+// would return false from this check but behave the same way as inputs to ECDH.
+//
+// This check is performed in constant time as long as the key types and their
+// curve match.
+func (k *PublicKey) Equal(x crypto.PublicKey) bool {
+	xx, ok := x.(*PublicKey)
+	if !ok {
+		return false
 	}
-
-	n, err = keymatbuf.Read(iv)
-	if n != ivlen || err != nil {
-		panic("keymaterial was short reading iv")
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic(err)
-	}
-	padded, _ := zeroPadding([]byte(plaintext), block.BlockSize())
-	ciphertext := make([]byte, len(padded))
-
-	if _, err := crand.Read(iv); err != nil {
-		panic(err)
-	}
-	cbc := cipher.NewCBCEncrypter(block, iv)
-	cbc.CryptBlocks(ciphertext, padded)
-
-	fmt.Printf("cipher: %s\n", base64.StdEncoding.EncodeToString(ciphertext))
-	fmt.Printf("iv: %v\n", base64.StdEncoding.EncodeToString(iv))
-	fmt.Printf("key: %v\n", base64.StdEncoding.EncodeToString(key))
-
-	return addSalt(ciphertext, salt)
+	return k.curve == xx.curve &&
+		subtle.ConstantTimeCompare(k.publicKey, xx.publicKey) == 1
 }
 
-func zeroPadding(data []byte, blocklen int) ([]byte, error) {
-	if blocklen <= 0 {
-		return nil, fmt.Errorf("invalid blocklen %d", blocklen)
-	}
-	padlen := uint8(1)
-	for ((len(data) + int(padlen)) % blocklen) != 0 {
-		padlen++
-	}
-
-	if int(padlen) > blocklen {
-		panic(fmt.Sprintf("generated invalid padding length %v for block length %v", padlen, blocklen))
-	}
-	pad := bytes.Repeat([]byte{byte(0)}, int(padlen))
-	return append(data, pad...), nil
+func (k *PublicKey) Curve() Curve {
+	return k.curve
 }
 
-func pkcs7Pad(data []byte, blocklen int) ([]byte, error) {
-	if blocklen <= 0 {
-		return nil, fmt.Errorf("invalid blocklen %d", blocklen)
-	}
-	padlen := uint8(1)
-	for ((len(data) + int(padlen)) % blocklen) != 0 {
-		padlen++
-	}
-
-	if int(padlen) > blocklen {
-		panic(fmt.Sprintf("generated invalid padding length %v for block length %v", padlen, blocklen))
-	}
-	pad := bytes.Repeat([]byte{byte(padlen)}, int(padlen))
-	return append(data, pad...), nil
+// PrivateKey is an ECDH private key, usually kept secret.
+//
+// These keys can be parsed with [crypto/x509.ParsePKCS8PrivateKey] and encoded
+// with [crypto/x509.MarshalPKCS8PrivateKey]. For NIST curves, they then need to
+// be converted with [crypto/ecdsa.PrivateKey.ECDH] after parsing.
+type PrivateKey struct {
+	curve      Curve
+	privateKey []byte
+	boring     *boring.PrivateKeyECDH
+	// publicKey is set under publicKeyOnce, to allow loading private keys with
+	// NewPrivateKey without having to perform a scalar multiplication.
+	publicKey     *PublicKey
+	publicKeyOnce sync.Once
 }
 
-var chars = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-
-func genChars(n int) []byte {
-	out := make([]byte, n)
-	rs := make([]byte, n)
-	crand.Read(rs)
-	for i := 0; i < n; i++ {
-		out[i] = chars[uint(rs[i])%uint(len(chars))]
+// ECDH performs an ECDH exchange and returns the shared secret. The [PrivateKey]
+// and [PublicKey] must use the same curve.
+//
+// For NIST curves, this performs ECDH as specified in SEC 1, Version 2.0,
+// Section 3.3.1, and returns the x-coordinate encoded according to SEC 1,
+// Version 2.0, Section 2.3.5. The result is never the point at infinity.
+//
+// For [X25519], this performs ECDH as specified in RFC 7748, Section 6.1. If
+// the result is the all-zero value, ECDH returns an error.
+func (k *PrivateKey) ECDH(remote *PublicKey) ([]byte, error) {
+	if k.curve != remote.curve {
+		return nil, errors.New("crypto/ecdh: private key and public key curves do not match")
 	}
-	return out
+	return k.curve.ecdh(k, remote)
+}
+
+// Bytes returns a copy of the encoding of the private key.
+func (k *PrivateKey) Bytes() []byte {
+	// Copy the private key to a fixed size buffer that can get allocated on the
+	// caller's stack after inlining.
+	var buf [66]byte
+	return append(buf[:0], k.privateKey...)
+}
+
+// Equal returns whether x represents the same private key as k.
+//
+// Note that there can be equivalent private keys with different encodings which
+// would return false from this check but behave the same way as inputs to [ECDH].
+//
+// This check is performed in constant time as long as the key types and their
+// curve match.
+func (k *PrivateKey) Equal(x crypto.PrivateKey) bool {
+	xx, ok := x.(*PrivateKey)
+	if !ok {
+		return false
+	}
+	return k.curve == xx.curve &&
+		subtle.ConstantTimeCompare(k.privateKey, xx.privateKey) == 1
+}
+
+func (k *PrivateKey) Curve() Curve {
+	return k.curve
+}
+
+func (k *PrivateKey) PublicKey() *PublicKey {
+	k.publicKeyOnce.Do(func() {
+		if k.boring != nil {
+			// Because we already checked in NewPrivateKey that the key is valid,
+			// there should not be any possible errors from BoringCrypto,
+			// so we turn the error into a panic.
+			// (We can't return it anyhow.)
+			kpub, err := k.boring.PublicKey()
+			if err != nil {
+				panic("boringcrypto: " + err.Error())
+			}
+			k.publicKey = &PublicKey{
+				curve:     k.curve,
+				publicKey: kpub.Bytes(),
+				boring:    kpub,
+			}
+		} else {
+			k.publicKey = k.curve.privateKeyToPublicKey(k)
+		}
+	})
+	return k.publicKey
+}
+
+// Public implements the implicit interface of all standard library private
+// keys. See the docs of [crypto.PrivateKey].
+func (k *PrivateKey) Public() crypto.PublicKey {
+	return k.PublicKey()
 }
