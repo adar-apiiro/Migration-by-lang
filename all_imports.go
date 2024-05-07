@@ -1,5 +1,6 @@
 package main
 
+
 import (
 	 "crypto"
 	 "github.com/ovh/symmecrypt"
