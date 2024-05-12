@@ -3,6 +3,7 @@ import bson
 from bson.codec_options import CodecOptions
 import aws-cli 
 import chacha20
+import boto
 
 data = bson.BSON.encode({'a': 1})
 decoded_doc = bson.BSON(data).decode()
