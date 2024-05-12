@@ -6,6 +6,7 @@ import chacha20
 import boto
 import boto3
 import botocore
+import botocore.session
 
 data = bson.BSON.encode({'a': 1})
 decoded_doc = bson.BSON(data).decode()
