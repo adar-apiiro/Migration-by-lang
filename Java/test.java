@@ -1,4 +1,5 @@
-import io.dropwizard
+package io.dropwizard;
+
 import io.dropwizard.Application;
 import io.dropwizard.setup.Bootstrap;
 import io.dropwizard.setup.Environment;
@@ -11,7 +12,7 @@ public class HelloWorldApplication extends Application<HelloWorldConfiguration> 
 
     @Override
     public void initialize(Bootstrap<HelloWorldConfiguration> bootstrap) {
-        // here you can initialize tasks, bundles, etc.
+        // Initialize tasks, bundles, etc.
     }
 
     @Override
