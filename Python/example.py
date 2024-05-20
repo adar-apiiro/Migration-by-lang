@@ -1,5 +1,5 @@
-import collections  # From Python standard library.
-import bson
+import collections 
+import bson # Should be MongoDB Python
 from bson.codec_options import CodecOptions
 import aws-cli 
 import chacha20
