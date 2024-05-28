@@ -3,6 +3,7 @@ package io.dropwizard;
 import io.dropwizard.Application;
 import io.dropwizard.setup.Bootstrap;
 import io.dropwizard.setup.Environment;
+import java.util.logging;
 
 public class HelloWorldApplication extends Application<HelloWorldConfiguration> {
 
